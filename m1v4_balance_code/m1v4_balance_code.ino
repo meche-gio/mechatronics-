@@ -26,9 +26,10 @@
 #define MPU6050_ADDR 0x68
 
 // PID Constants - Tune these for your robot
-double Kp = 40.0;   // Proportional gain
-double Ki = 0.8;    // Integral gain
-double Kd = 1.2;    // Derivative gain
+// Increased for faster response
+double Kp = 80.0;   // Proportional gain (increased for faster reaction)
+double Ki = 2.0;    // Integral gain (increased for drift correction)
+double Kd = 3.0;    // Derivative gain (increased for damping)
 
 // PID variables
 double setpoint = 0.0;        // Target angle (0 = balanced)
@@ -58,10 +59,10 @@ volatile long encoderCountB = 0;
 
 // Timing
 unsigned long timer = 0;
-float dt = 0.01; // 10ms loop time
+float dt = 0.005; // 5ms loop time (faster!)
 
 // Complementary filter constant
-float alpha = 0.96;
+float alpha = 0.98;  // Trust gyro more for faster response
 
 // Dead zone - angle beyond which robot is considered fallen
 const float FALL_ANGLE = FALL_ANGLE_THRESHOLD;
@@ -161,8 +162,8 @@ void loop() {
     lastPrint = currentTime;
   }
 
-  // Maintain loop time (~10ms)
-  while (millis() - currentTime < 10);
+  // Maintain loop time (~5ms for faster response)
+  while (millis() - currentTime < 5);
 }
 
 void initMPU6050() {
@@ -282,7 +283,7 @@ double calculatePID(double input) {
 
   // Integral term with anti-windup
   integral += error * timeChange;
-  integral = constrain(integral, -100, 100); // Anti-windup
+  integral = constrain(integral, -50, 50); // Tighter anti-windup for faster response
   double iTerm = Ki * integral;
 
   // Derivative term
@@ -330,15 +331,23 @@ void controlMotors(double pidOutput) {
  * dirPin: The direction pin (IN2 or IN4)
  * speed: -255 to 255 (negative = reverse)
  */
+#define MIN_MOTOR_SPEED 30  // Minimum PWM to overcome static friction
+
 void setMotorDRV8833(int pwmPin, int dirPin, int speed) {
+  // Apply minimum speed threshold to overcome static friction
+  int absSpeed = abs(speed);
+  if (absSpeed > 0 && absSpeed < MIN_MOTOR_SPEED) {
+    absSpeed = MIN_MOTOR_SPEED;
+  }
+
   if (speed > 0) {
     // Forward: PWM on IN1, LOW on IN2
-    analogWrite(pwmPin, speed);
+    analogWrite(pwmPin, absSpeed);
     digitalWrite(dirPin, LOW);
   } else if (speed < 0) {
     // Reverse: LOW on IN1, PWM on IN2
     digitalWrite(pwmPin, LOW);
-    analogWrite(dirPin, abs(speed));
+    analogWrite(dirPin, absSpeed);
   } else {
     // Stop (coast)
     digitalWrite(pwmPin, LOW);
