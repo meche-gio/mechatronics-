@@ -7,21 +7,46 @@
  * - MPU6050 Gyroscope/Accelerometer
  * - DRV8833 Dual Motor Driver
  * - HC-SR04 Ultrasonic Sensor
- * - Two DC Motors with encoders
+ * - Two DC Motors with encoders (optional)
  */
 
 #include <Wire.h>
-#include "config.h"
+
+// ==================== PIN CONFIGURATION ====================
+// DRV8833 Motor Driver (2 pins per motor, no separate enable)
+#define MOTOR_A_IN1   9    // Right motor - PWM capable
+#define MOTOR_A_IN2   10   // Right motor - PWM capable
+#define MOTOR_B_IN1   11   // Left motor - PWM capable
+#define MOTOR_B_IN2   12   // Left motor - digital
+
+// HC-SR04 Ultrasonic Sensor
+#define TRIG_PIN      7
+#define ECHO_PIN      8
+
+// Encoder pins (optional - comment out if not using encoders)
+#define ENCODER_A_PIN_A  2   // Interrupt 0
+#define ENCODER_A_PIN_B  4   // Digital
+#define ENCODER_B_PIN_A  3   // Interrupt 1
+#define ENCODER_B_PIN_B  5   // Digital
+
+// Other pins
+#define LED_PIN       13   // Built-in LED
+#define POT_PIN       A0   // Potentiometer for tuning (optional)
+
+// ==================== CONFIGURATION ====================
+#define SERIAL_BAUD_RATE  115200
+#define MAX_PWM_VALUE     255
+#define FALL_ANGLE_THRESHOLD  45.0  // degrees
 
 // MPU6050 I2C address
 #define MPU6050_ADDR 0x68
 
-// ===== PID CONSTANTS =====
-// These values are tuned for a typical small self-balancing robot
-// You may need to adjust based on your specific hardware
-double Kp = DEFAULT_KP;   // Proportional - main balancing force
-double Ki = DEFAULT_KI;   // Integral - corrects steady-state error
-double Kd = DEFAULT_KD;   // Derivative - dampens oscillations
+// ==================== PID CONSTANTS ====================
+// Tune these for your specific robot!
+// Start with Kp only, then add Kd, then Ki
+double Kp = 55.0;    // Proportional - main balancing force
+double Ki = 0.8;     // Integral - corrects steady-state error
+double Kd = 1.8;     // Derivative - dampens oscillations
 
 // PID variables
 double setpoint = 0.0;        // Target angle (0 = balanced upright)
@@ -51,12 +76,12 @@ float gyroAngleX = 0.0;
 volatile long encoderCountA = 0;
 volatile long encoderCountB = 0;
 
-// ===== HC-SR04 ULTRASONIC SENSOR =====
+// Ultrasonic sensor
 const int trigPin = TRIG_PIN;
 const int echoPin = ECHO_PIN;
 float distanceCM = 999.0;
 
-// ===== OBSTACLE AVOIDANCE SETTINGS =====
+// ==================== OBSTACLE AVOIDANCE ====================
 // Distance thresholds (cm)
 const float FAR_DIST      = 120.0;  // Beyond this: full forward
 const float SLOW_DIST1    = 80.0;   // Start slowing
@@ -88,6 +113,7 @@ bool isFallen = false;
 // Dead band for motors (minimum PWM to overcome static friction)
 const int MOTOR_DEADBAND = 25;
 
+// ==================== SETUP ====================
 void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
 
@@ -104,7 +130,7 @@ void setup() {
   pinMode(MOTOR_B_IN1, OUTPUT);
   pinMode(MOTOR_B_IN2, OUTPUT);
 
-  // Initialize encoder pins
+  // Initialize encoder pins (comment out if not using encoders)
   pinMode(ENCODER_A_PIN_A, INPUT_PULLUP);
   pinMode(ENCODER_A_PIN_B, INPUT_PULLUP);
   pinMode(ENCODER_B_PIN_A, INPUT_PULLUP);
@@ -174,6 +200,7 @@ void setup() {
   startTime = millis();
 }
 
+// ==================== MAIN LOOP ====================
 void loop() {
   unsigned long currentTime = millis();
 
@@ -226,7 +253,7 @@ void loop() {
   while (millis() - currentTime < 10);
 }
 
-// ================== IMU FUNCTIONS ==================
+// ==================== IMU FUNCTIONS ====================
 
 void initMPU6050() {
   // Wake up MPU6050
@@ -249,7 +276,6 @@ void initMPU6050() {
   Wire.endTransmission(true);
 
   // Digital Low Pass Filter: ~44Hz bandwidth
-  // This reduces noise but adds ~4.9ms delay
   Wire.beginTransmission(MPU6050_ADDR);
   Wire.write(0x1A);  // CONFIG
   Wire.write(0x03);  // DLPF_CFG = 3
@@ -279,8 +305,7 @@ void readMPU6050() {
   int16_t gz = (Wire.read() << 8) | Wire.read();
 
   // Convert to physical units
-  // ±2g range: 16384 LSB/g
-  accX = ax / 16384.0;
+  accX = ax / 16384.0;  // ±2g range: 16384 LSB/g
   accY = ay / 16384.0;
   accZ = az / 16384.0;
 
@@ -333,14 +358,13 @@ void calculateAngle() {
   gyroAngleX += gyroX * dt;
 
   // Complementary filter: combine both
-  // Trust gyro for fast changes, accelerometer for long-term accuracy
   currentAngle = alpha * (currentAngle + gyroX * dt) + (1.0 - alpha) * angleAcc;
 
   // Apply offset so upright = 0°
   currentAngle -= angleOffset;
 }
 
-// ================== PID CONTROLLER ==================
+// ==================== PID CONTROLLER ====================
 
 double calculatePID(double currentInput) {
   unsigned long now = millis();
@@ -357,14 +381,13 @@ double calculatePID(double currentInput) {
 
   // Integral term with anti-windup
   integral += error * timeChange;
-  // Limit integral to prevent windup
-  double integralLimit = 100.0 / Ki;  // Dynamic limit based on Ki
+  double integralLimit = 100.0 / Ki;
   if (integralLimit < 50) integralLimit = 50;
   if (integralLimit > 200) integralLimit = 200;
   integral = constrain(integral, -integralLimit, integralLimit);
   double iTerm = Ki * integral;
 
-  // Derivative term (on error change)
+  // Derivative term
   double derivative = (error - lastError) / timeChange;
   double dTerm = Kd * derivative;
 
@@ -378,17 +401,16 @@ double calculatePID(double currentInput) {
   return pidOutput;
 }
 
-// ================== MOTOR CONTROL ==================
+// ==================== MOTOR CONTROL ====================
 
 void controlMotors(double pidOutput) {
-  // Convert PID output to motor speed
   int speed = (int)pidOutput;
 
   // Constrain to valid PWM range
   speed = constrain(speed, -MAX_PWM_VALUE, MAX_PWM_VALUE);
 
-  // Direction correction (flip if robot runs away from balance point)
-  // If robot falls forward when leaning forward, flip this sign
+  // Direction correction - flip if robot runs away from balance
+  // Change this sign if motors run the wrong direction!
   speed = -speed;
 
   // Apply deadband compensation
@@ -407,12 +429,7 @@ void controlMotors(double pidOutput) {
 }
 
 void setMotorDRV8833(int in1Pin, int in2Pin, int speed) {
-  // DRV8833 control:
-  // Forward:  IN1=PWM, IN2=LOW
-  // Reverse:  IN1=LOW, IN2=PWM
-  // Coast:    IN1=LOW, IN2=LOW
-  // Brake:    IN1=HIGH, IN2=HIGH
-
+  // DRV8833: Forward=IN1 PWM/IN2 LOW, Reverse=IN1 LOW/IN2 PWM
   if (speed > 0) {
     analogWrite(in1Pin, speed);
     digitalWrite(in2Pin, LOW);
@@ -420,7 +437,6 @@ void setMotorDRV8833(int in1Pin, int in2Pin, int speed) {
     digitalWrite(in1Pin, LOW);
     analogWrite(in2Pin, abs(speed));
   } else {
-    // Coast stop
     digitalWrite(in1Pin, LOW);
     digitalWrite(in2Pin, LOW);
   }
@@ -431,10 +447,9 @@ void stopMotors() {
   digitalWrite(MOTOR_A_IN2, LOW);
   digitalWrite(MOTOR_B_IN1, LOW);
   digitalWrite(MOTOR_B_IN2, LOW);
-
   motorSpeedA = 0;
   motorSpeedB = 0;
-  integral = 0;  // Reset integral to prevent windup
+  integral = 0;
 }
 
 void brakeMotors() {
@@ -443,13 +458,12 @@ void brakeMotors() {
   digitalWrite(MOTOR_A_IN2, HIGH);
   digitalWrite(MOTOR_B_IN1, HIGH);
   digitalWrite(MOTOR_B_IN2, HIGH);
-
   motorSpeedA = 0;
   motorSpeedB = 0;
   integral = 0;
 }
 
-// ================== ENCODER ISRs ==================
+// ==================== ENCODER ISRs ====================
 
 void encoderAISR() {
   if (digitalRead(ENCODER_A_PIN_A) == digitalRead(ENCODER_A_PIN_B)) {
@@ -467,59 +481,47 @@ void encoderBISR() {
   }
 }
 
-// ================== ULTRASONIC SENSOR ==================
+// ==================== ULTRASONIC SENSOR ====================
 
 float readUltrasonicCM() {
-  // Send trigger pulse
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
 
-  // Read echo with timeout (20ms max = ~340cm)
   unsigned long duration = pulseIn(echoPin, HIGH, 20000UL);
 
   if (duration == 0) {
-    return 999.0;  // No echo = no obstacle or too far
+    return 999.0;
   }
 
-  // Speed of sound = 343 m/s = 0.0343 cm/µs
-  // Distance = duration × 0.0343 / 2 (round trip)
-  float distance = (duration * 0.0343f) / 2.0f;
-
-  return distance;
+  return (duration * 0.0343f) / 2.0f;
 }
 
-// ================== OBSTACLE AVOIDANCE ==================
+// ==================== OBSTACLE AVOIDANCE ====================
 
 float calculateMotionAngle() {
   float desiredAngle;
 
   if (distanceCM == 999.0 || distanceCM > FAR_DIST) {
-    // No obstacle: cruise forward
     desiredAngle = ANGLE_FORWARD_FAST;
   } else if (distanceCM > SLOW_DIST1) {
-    // Far obstacle: slow forward
     desiredAngle = ANGLE_FORWARD_SLOW;
   } else if (distanceCM > SLOW_DIST2) {
-    // Getting close: nearly stop
     desiredAngle = ANGLE_ALMOST_STOP;
   } else if (distanceCM > REVERSE_DIST1) {
-    // Close: start reversing
     desiredAngle = ANGLE_REVERSE_SOFT;
   } else if (distanceCM > REVERSE_DIST2) {
-    // Very close: reverse more
     desiredAngle = ANGLE_REVERSE_STRONG;
   } else {
-    // Extremely close: strong reverse
     desiredAngle = ANGLE_REVERSE_STRONG * 1.5;
   }
 
   return desiredAngle;
 }
 
-// ================== FALL HANDLING ==================
+// ==================== FALL HANDLING ====================
 
 void handleFall() {
   isFallen = true;
@@ -532,17 +534,15 @@ void handleFall() {
   Serial.println(currentAngle, 1);
   Serial.println(F("Reset Arduino to continue"));
 
-  // Blink LED indefinitely
   while (1) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     delay(300);
   }
 }
 
-// ================== DEBUG OUTPUT ==================
+// ==================== DEBUG OUTPUT ====================
 
 void printDebug() {
-  // Format for Arduino Serial Plotter compatibility
   Serial.print(F("angle:"));
   Serial.print(currentAngle, 1);
   Serial.print(F(" set:"));
@@ -555,7 +555,7 @@ void printDebug() {
   Serial.println(distanceCM, 0);
 }
 
-// ================== UTILITY FUNCTIONS ==================
+// ==================== UTILITY ====================
 
 int readPotentiometer() {
   return analogRead(POT_PIN);
